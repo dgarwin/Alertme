@@ -1,31 +1,39 @@
-# AlertMe — AWS Plan
+# AlertMe — AWS Plan (DynamoDB revision)
 
 Supersedes `PLAN-LEAN.md`'s hosting choices. Same product, same app, same page
-state machine — moved onto managed AWS with **multi-AZ compute and database**,
-a **multi-region recovery story**, and a hard budget of **<$50/month**.
+state machine — on managed AWS with **multi-AZ compute and database**, a
+**multi-region data layer**, and a hard budget of **<$50/month** (this
+revision lands at ~$10).
 
-Design rule: lean on AWS managed services wherever they delete code we'd
-otherwise write (auth, scheduling, scaling, failover), and spend the budget on
-the one thing that has a real price tag: the Multi-AZ database.
+Design rule: lean on AWS managed services wherever they delete code or ops
+we'd otherwise own (auth, scheduling, scaling, failover, replication).
+
+> **Revision note:** v1 of this plan used Multi-AZ RDS Postgres (~$48.50/mo
+> total; see git history). Switching to DynamoDB removed the two biggest costs
+> — the database instance ($28) and, because DynamoDB needs no VPC, the NAT
+> instances ($13.50) — and upgraded multi-region from pilot-light to an
+> active-active data layer. The price is query flexibility, covered in §3.
 
 ---
 
-## 1. The budget math that picks the architecture
+## 1. Why DynamoDB changes the shape, not just the bill
 
-Multi-AZ RDS Postgres (db.t4g.micro + 20 GB) costs ~$28/month. That leaves
-~$20 for everything else, which immediately decides compute:
-
-| Compute option | Multi-AZ? | ~$/mo | Verdict |
-|---|---|---|---|
-| Fargate (2 ARM tasks) + ALB | yes | $14 + $17 ALB = $31 | ALB alone breaks the budget |
-| Fargate (2 tasks, public IPs, API GW + Cloud Map) | yes | $14 + $7 IPv4 = $21 | ≈$54 total — just over, more moving parts |
-| **Lambda + API Gateway HTTP API** | **yes, inherently, active-active** | **~$1** | **winner — multi-AZ is free** |
-
-Lambda runs across all AZs in the region by default. The property we'd pay
-Fargate ~$21/month to have — two instances in two AZs behind a load balancer —
-is simply how Lambda works, at this traffic level for about a dollar. It's as
-tried-and-true as AWS gets, and it also deletes the Dockerfile, the ECS config,
-and OS patching.
+- **Multi-AZ by construction.** Every DynamoDB write is synchronously
+  replicated across three AZs before it's acknowledged. The property we were
+  buying with RDS Multi-AZ (~$28/mo, 60s failover) is DynamoDB's baseline, with
+  no failover event at all, for on-demand pennies.
+- **The VPC disappears.** RDS forced Lambdas into a VPC, which forced NAT for
+  FCM egress — the ugliest corner of v1. DynamoDB is a regional API endpoint:
+  Lambdas run outside any VPC with normal internet access. No subnets, no NAT,
+  no security groups, ~40 fewer lines of CDK, and one less thing to break.
+- **Multi-region becomes real.** A DynamoDB **global table** replicates to a
+  second region in ~1s for roughly 2× write cost — at our volume, ~$1/mo. With
+  the (stateless, pay-per-use) API stack deployed in both regions behind
+  Route 53 failover, a regional outage means DNS flips and the app keeps
+  working against live data. RTO minutes, RPO ~1s — v1's warm standby cost
+  $62/mo and did less.
+- **Ops we stop owning:** storage scaling, connection limits, engine upgrades,
+  maintenance windows, PITR is a checkbox ($0.20/GB-mo ≈ pennies).
 
 ---
 
@@ -34,147 +42,154 @@ and OS patching.
 ```
 Flutter app (iOS + Android)
    │ HTTPS                                  ┌────────────────────────────┐
-   ▼                                        │  AWS region (multi-AZ)     │
-API Gateway HTTP API ── JWT authorizer ◄────┤  Cognito user pool         │
-   │                                        │  (Sign in w/ Apple+Google) │
-   ▼                                        └────────────────────────────┘
-api Lambda (Go, whole REST API, in VPC)
+   ▼                                        │  Cognito user pool         │
+API Gateway HTTP API ── JWT authorizer ◄────┤  (Sign in w/ Apple+Google) │
+   │                                        └────────────────────────────┘
+   ▼
+api Lambda (Go, whole REST API — no VPC)
    │            │
-   │            └── SQS delay queue ──► pager Lambda (Go, in VPC)
+   │            └── SQS delay queue ──► pager Lambda (Go)
    ▼                    ▲    │                 │           │
-RDS Postgres            └────┘                 ▼           ▼
-Multi-AZ (t4g.micro)   re-enqueue         RDS (state)   FCM → APNs/FCM
-                       next nag                          (both platforms)
+DynamoDB                └────┘                 ▼           ▼
+(global table,         re-enqueue        DynamoDB      FCM → APNs/FCM
+ 3-AZ, PITR, TTL)      next nag          (state)       (both platforms)
 ```
 
-### Service by service — and the code each one deletes
+### Service by service
 
-- **Cognito user pool** with Apple + Google as federated identity providers.
-  API Gateway's built-in **JWT authorizer** validates Cognito tokens before our
-  code ever runs. *Deletes:* the entire auth module — token issuance, refresh,
-  verification, `/auth/*` endpoints. Free tier covers us to 10k+ MAU.
-- **API Gateway HTTP API**: routing, TLS, throttling (built-in rate limiting
-  replaces hand-rolled limiter code). ~$1/million requests.
-- **api Lambda**: one Go binary serving the whole REST API (chi router via the
-  Lambda Go proxy — it's a normal HTTP server, testable locally, portable to
-  Fargate later unchanged). 8 routes now (Cognito ate the auth ones).
-- **SQS as the nag scheduler.** The lean plan's jobs table becomes a delay
-  queue: creating a page sends `{page_id, attempt: 0}`; the **pager Lambda**
-  loads the page, and if it's still unacknowledged, sends the push and
-  re-enqueues the next attempt with `DelaySeconds` per the nag schedule
-  (30s, 30s, 60s, 2m, 5m… to 30-min expiry; all ≤ SQS's 900s max delay).
-  Acks don't cancel messages — the next fire sees `acked` in Postgres and drops.
-  At-least-once delivery + attempt number recorded in `page_events` = no
-  double alerts. A **DLQ + CloudWatch alarm** catches poison messages.
-  *Deletes:* the scheduler goroutine, and makes retry durability AWS's problem.
-- **RDS Postgres, Multi-AZ deployment** (db.t4g.micro, 20 GB gp3): synchronous
-  standby in a second AZ, automatic failover in ~60s, automated backups with
-  PITR. Same 6-table schema as the lean plan. Connection math: a handful of
-  concurrent Lambdas with one connection each is nothing against t4g.micro's
-  ~80-connection ceiling — **skip RDS Proxy** ($22/mo) until traffic argues.
-- **Push:** FCM HTTP v1 remains the single push API for both platforms (free;
-  the `apns` block carries iOS interruption level and sound). SNS mobile push
-  exists but adds an endpoint-management layer for zero benefit here.
-- **SSM Parameter Store** (free) for the FCM key and DB credentials — not
-  Secrets Manager ($0.40/secret). **ECR** for images or just zip deploys.
-- **IaC: one CDK (TypeScript) stack**, ~300 lines. Deploy via GitHub Actions
-  with OIDC (no long-lived AWS keys). `cdk deploy` is the entire release
-  process; Lambda versioning gives instant rollback.
-
-### The one genuinely annoying decision: VPC egress
-
-Lambdas must be in the VPC to reach RDS, but the pager Lambda must also reach
-FCM on the internet — and a managed NAT Gateway is **$33/month + data**, which
-torpedoes the budget on its own. Options, honestly:
-
-| Option | ~$/mo | Tradeoff |
-|---|---|---|
-| Managed NAT Gateway | $33+ | Blows the budget; the "right" answer at funded scale |
-| **2× NAT instances (t4g.nano, one per AZ)** | **$13.50** | **Default.** fck-nat AMI or Amazon Linux NAT; the only self-managed piece in the stack |
-| Public RDS (TLS forced + IAM auth), Lambdas out of VPC | $0 | Cleanest ops, ~$35 total; a public 5432 is the same posture Neon/Supabase sell, but it's the first thing a security review flags |
-
-Default to the NAT instances; swap to managed NAT Gateway the day the budget
-relaxes — it's a one-line CDK change.
+- **Cognito user pool** with Apple + Google federation; API Gateway's built-in
+  **JWT authorizer** rejects unauthenticated requests before our code runs.
+  *Deletes:* the entire auth module. Free at our MAU.
+- **API Gateway HTTP API** — routing, TLS, throttling. ~$1/M requests.
+- **api Lambda** — one Go binary, whole REST API (chi router behind the Lambda
+  proxy; a normal HTTP server, testable locally, portable later). 8 routes.
+- **SQS delay queue as the nag scheduler** — unchanged from v1: page creation
+  enqueues `{page_id, attempt: 0}`; the **pager Lambda** re-reads page state,
+  drops if acknowledged, otherwise pushes via FCM and re-enqueues the next
+  attempt with `DelaySeconds` (30s, 30s, 60s, 2m, 5m… to 30-min expiry, all
+  ≤ 900s). DLQ + alarm for poison messages. Duplicate fires are deduped by
+  conditional writes on attempt number.
+- **DynamoDB, on-demand, single table** (see §3), PITR on, **TTL** on invites
+  and expired page items — the lean plan's "auto-purge after retention window"
+  becomes a table setting instead of a cron job.
+- **Push:** FCM HTTP v1 for both platforms (free), unchanged.
+- **SSM Parameter Store** (free) for the FCM key; no DB credentials to store —
+  DynamoDB access is the Lambda's **IAM role**, so there is no database
+  password anywhere in the system.
+- **IaC:** one CDK (TypeScript) stack, now ~250 lines. GitHub Actions + OIDC;
+  `cdk deploy` releases, Lambda versioning rolls back.
 
 ---
 
-## 3. Multi-AZ and multi-region, precisely
+## 3. Data model — the real cost of DynamoDB
 
-**Multi-AZ (in budget, day one):**
+The discipline: DynamoDB requires knowing your access patterns up front and
+gives you no ad-hoc SQL later. We can pay that confidently because the API is
+8 routes and every query is known:
 
-- Compute: Lambda — active-active across AZs automatically. An AZ failure is
-  invisible.
-- Database: RDS Multi-AZ — automatic failover to the synchronous standby,
-  ~60s of write unavailability; in-flight nags retry through it via SQS.
-- SQS, API Gateway, Cognito, Route 53: regionally replicated managed services;
-  multi-AZ is inherent.
+**Single table, `alertme`** (PK / SK), with one GSI:
 
-**Multi-region (tiered, because active-active doesn't fit $50):**
+| Entity | PK | SK | Notes |
+|---|---|---|---|
+| User profile | `USER#<id>` | `PROFILE` | settings inline |
+| Device | `USER#<id>` | `DEVICE#<token>` | capabilities, last_seen |
+| Pairing | `USER#<id>` | `PAIR#<peer_id>` | written to both users in one transaction |
+| Invite | `INVITE#<code>` | `META` | TTL = expiry |
+| Page | `PAGE#<id>` | `META` | state, tier, message, idempotency key |
+| Page event | `PAGE#<id>` | `EVT#<ts>#<type>` | append-only timeline |
 
-- **In budget — pilot light (RTO ~30–60 min, RPO ≤ 15 min):** RDS cross-region
-  automated backup replication (~$2/mo snapshot storage) + the CDK stack is
-  region-agnostic by construction (`cdk deploy --context region=us-west-2`) +
-  Route 53 health check on `/health`. Regional outage = restore snapshot in
-  region B, deploy stack, flip DNS. A quarterly GitHub Action drill actually
-  runs the restore so the runbook stays true.
-- **+$15/mo — warm standby (RTO ~5 min):** cross-region read replica
-  (t4g.micro, single-AZ) promoted on failover, stack pre-deployed. Total ≈$62 —
-  first thing to add when the budget moves.
-- **Not on the menu:** Aurora Global / active-active writes. Real regional
-  failovers at this stage are rarer than the bugs that redundancy complexity
-  would cause.
+**GSI1** (`GSI1PK = USER#<recipient>`, `GSI1SK = <created_at>`) on page items →
+inbox, history, and `GET /pages?since=…` polling. Sender history mirrors it via
+a second projection attribute.
+
+Access patterns each map to one `GetItem`/`Query`. Correctness tools are
+arguably *better* than v1's SQL:
+
+- **Idempotent page creation:** `TransactWriteItems` — page item with
+  `attribute_not_exists(PK)` on the idempotency key + first event + SQS send
+  after commit.
+- **Idempotent ack:** conditional update `state ∈ {pushed, delivered, seen}` →
+  `acked`; a losing duplicate fails the condition and is dropped.
+- **Pairing consent:** one transaction writes both directions or neither.
+
+What we genuinely give up, and the mitigations:
+
+- **Ad-hoc queries / analytics** (debugging "show me all pages that expired
+  yesterday"): PartiQL console covers simple cases; when real analytics are
+  needed, DynamoDB's built-in **export to S3 + Athena** gives full SQL over
+  snapshots for pennies, no pipeline to build.
+- **Schema migrations** become item-versioning discipline (a `v` attribute and
+  read-time upgrades) rather than `ALTER TABLE`.
+- **Relational fallback:** if the team ever hates it, the repository layer is
+  the only thing that touches DynamoDB; the state machine and handlers don't
+  know. But at 8 routes and 6 entities, single-table DynamoDB is squarely
+  inside its sweet spot — this is the workload it was built for.
 
 ---
 
-## 4. Observability (all inside free tiers)
+## 4. Multi-AZ and multi-region, precisely
 
-- **CloudWatch alarms → SNS email:** pager-Lambda errors, DLQ depth > 0,
-  API 5xx rate, RDS failover/CPU/storage events. ~$2–3/mo in alarms + logs
-  (short retention).
-- **Canary:** EventBridge rate(5 min) → a canary Lambda where bot A pages bot B
-  through the real API and asserts the state machine advances; it pings a
-  healthchecks.io URL only on success — a stalled *scheduler* (not just a dead
-  API) produces an email within minutes. (CloudWatch Synthetics does this for
-  ~$10/mo; the Lambda does it for ~$0.)
-- Sentry free tier on the Flutter app; structured JSON logs with `page_id`
-  correlation end-to-end.
+- **Multi-AZ, day one, no action required:** Lambda active-active across AZs;
+  DynamoDB synchronously 3-AZ; SQS/API Gateway/Cognito/Route 53 inherently
+  multi-AZ. There is no failover event anywhere in an AZ outage.
+- **Multi-region, in budget (~+$2/mo):** DynamoDB **global table** replica in
+  region B (RPO ~1s) + the same CDK stack deployed there (Lambda/API GW/SQS
+  cost ~$0 idle — pay-per-use is what makes a warm second region affordable) +
+  Route 53 health-check failover on `/health`. RTO: minutes, mostly DNS TTL.
+- **The honest caveat — Cognito is regional.** Tokens are JWTs validated
+  against public JWKS, so **existing sessions keep working in region B**; what
+  breaks during a Cognito-region outage is new sign-ins and token refresh
+  (≤1 h impact for active users). Acceptable for v1; document it in the
+  runbook rather than engineering around it.
+- SQS is regional: in-flight nags in a dead region resume via a safety-net
+  EventBridge rule in region B that re-enqueues unacknowledged pages found in
+  the (replicated) table. ~30 lines; the drill tests it quarterly.
 
 ---
 
-## 5. Cost sheet (prod, us-east-1)
+## 5. Observability (unchanged from v1, all ~free)
+
+- CloudWatch alarms → SNS email: pager-Lambda errors, **DLQ depth > 0**,
+  API 5xx, DynamoDB throttles (should never fire on on-demand).
+- Canary: EventBridge rate(5 min) → Lambda where bot A pages bot B through the
+  real API and asserts the state machine advances; pings healthchecks.io only
+  on success, so a stalled scheduler emails you within minutes.
+- Sentry free tier on the app; structured logs keyed by `page_id`.
+
+---
+
+## 6. Cost sheet (prod, us-east-1 + us-west-2 replica)
 
 | Item | $/mo |
 |---|---|
-| RDS Postgres db.t4g.micro **Multi-AZ** + 2×20 GB gp3 | ~28.00 |
-| 2× NAT instances (t4g.nano + public IPv4) | ~13.50 |
-| Lambda + API Gateway + SQS | ~1.00 |
-| Cognito, SSM, ECR, S3 | ~0.00 |
-| Route 53 hosted zone + health check | ~1.00 |
-| CloudWatch logs + alarms | ~3.00 |
-| Cross-region backup copies (pilot light) | ~2.00 |
-| **Total** | **~$48.50** |
+| DynamoDB on-demand + PITR + storage | ~1.00 |
+| Global table replica (region B writes + storage) | ~1.00 |
+| Lambda + API Gateway + SQS (both regions) | ~1.50 |
+| Cognito, SSM, ECR | ~0.00 |
+| Route 53 zone + 2 health checks | ~1.50 |
+| CloudWatch logs + alarms (both regions) | ~4.00 |
+| **Total** | **~$9** |
 
-Variants: public-RDS networking → **~$35**; add warm-standby region → ~$62.
-Staging: run Postgres in Docker locally + a `staging` CDK context with
-single-AZ RDS (~+$14) when the budget allows; not required to start.
+Headroom to the $50 cap: ~$40/mo — enough to add a single-AZ staging copy of
+the whole stack (~$2, it's all pay-per-use) *and* absorb 100× traffic growth
+before anything needs rethinking.
 
 ---
 
-## 6. What changed vs. the lean plan — and what didn't
+## 7. What changed vs. the RDS revision — and what didn't
 
-| | Lean (`PLAN-LEAN.md`) | AWS |
+| | v1 (RDS) | v2 (DynamoDB) |
 |---|---|---|
-| Compute | 1 Fly machine | Lambda, multi-AZ active-active |
-| DB | SQLite + Litestream | RDS Postgres Multi-AZ, PITR |
-| Nag scheduler | jobs table + goroutine | SQS delay queue + pager Lambda |
-| Auth code | Apple/Google verify in Go | deleted — Cognito + JWT authorizer |
-| Deploy downtime | ~10–30s | zero (Lambda versioning) |
-| Regional DR | none | pilot light, drilled quarterly |
-| $/mo | ~15 | ~48 |
+| Database | RDS Postgres Multi-AZ, 60s failover | DynamoDB, 3-AZ synchronous, no failover event |
+| Networking | VPC + 2 NAT instances | none — no VPC at all |
+| DB credentials | password in SSM | none — IAM role |
+| Multi-region | pilot light (RTO 30–60 min) | active-active data, warm stack (RTO minutes) |
+| Retention purge | cron/job | TTL attribute |
+| Query flexibility | full SQL | known patterns + Athena-on-export |
+| $/mo | ~48.50 | ~9 |
 
-Unchanged: the Flutter app, FCM-only push, invite-link pairing, the 6-table
-schema, idempotent acks, delivery receipts, event-sourced `page_events`, and
-the product rule that a page nags until a human acknowledges it. The Go code
-shrinks (auth and scheduler deleted) to ~1,200–1,800 lines across two Lambdas
-plus ~300 lines of CDK. Build order is the same: **prove the SQS nag loop with
-`curl` and two phones before writing any UI.**
+Unchanged: Flutter app, FCM-only push, Cognito auth, SQS nag scheduler,
+invite-link pairing, idempotent acks, delivery receipts, event-sourced
+timeline. Go code ~1,200–1,800 lines across two Lambdas + ~250 lines CDK.
+Build order still: **prove the SQS nag loop with `curl` and two phones before
+any UI.**
