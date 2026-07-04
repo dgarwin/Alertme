@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+      - run: go vet ./...
+      - run: go test ./...
+      - run: make build
+
+  infra:
+    runs-on: ubuntu-latest
+    needs: backend
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: make -C ../backend build # cdk assets must exist to synth
+      - run: npm ci
+      - run: npm run build
+      - run: npx cdk synth --quiet
+
+  # Deploy job (add once an AWS account is wired up):
+  # OIDC role assumption via aws-actions/configure-aws-credentials, then
+  # `npx cdk deploy --require-approval never` on pushes to main.
