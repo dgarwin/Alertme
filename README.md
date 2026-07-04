@@ -39,12 +39,15 @@ once bot credentials exist (see `cmd/canary`).
 
 ## Status
 
-- [x] CDK stack (synths; deployable)
+- [x] CDK stack (synths; deployable) — now includes GSI2 (sender-side page
+      index) and the canary's Cognito client id
 - [x] Domain model, single-table key schema, nag schedule (+tests)
 - [x] API routes wired with request/response contracts
-- [ ] DynamoDB store implementation (`internal/store/dynamo`)
-- [ ] FCM sender (`internal/push/fcm`)
-- [ ] Pager worker logic (`cmd/pager`)
-- [ ] Handler implementations (`internal/api/handlers.go`)
-- [ ] Canary (`cmd/canary`)
+- [x] DynamoDB store implementation (`internal/store/dynamo`, +key-schema tests)
+- [x] FCM sender (`internal/push/fcm`)
+- [x] Pager worker logic (`cmd/pager`, +tests against a fake store/sender)
+- [x] Handler implementations (`internal/api/handlers.go`, +tests against a
+      fake store)
+- [x] Canary (`cmd/canary`) — env-driven, no-ops until bot credentials are
+      provisioned
 - [ ] Flutter app

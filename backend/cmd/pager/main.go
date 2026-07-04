@@ -26,16 +26,69 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
+	"os"
+	"sync"
+	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
+	"github.com/dgarwin/alertme/backend/internal/model"
+	"github.com/dgarwin/alertme/backend/internal/nag"
+	"github.com/dgarwin/alertme/backend/internal/push"
+	"github.com/dgarwin/alertme/backend/internal/push/fcm"
 	"github.com/dgarwin/alertme/backend/internal/queue"
+	"github.com/dgarwin/alertme/backend/internal/store"
+	"github.com/dgarwin/alertme/backend/internal/store/dynamo"
 )
 
+// maxFinalDelay caps the last nag tick enqueued once the schedule is
+// exhausted but the page hasn't expired yet (SQS DelaySeconds max is 900s).
+const maxFinalDelay = 15 * time.Minute
+
 type handler struct {
-	// build-out: store.Store, push.Sender (fcm), queue.Enqueuer, nag schedule
+	store store.Store
+	queue queue.Enqueuer
+
+	// FCM credentials come from SSM and are fetched once per cold start.
+	ssmClient *ssm.Client
+	fcmParam  string
+
+	senderOnce sync.Once
+	sender     push.Sender // pre-set (e.g. by tests) to skip the SSM/FCM lazy init entirely
+	senderErr  error
+}
+
+func (h *handler) getSender(ctx context.Context) (push.Sender, error) {
+	if h.sender != nil {
+		return h.sender, nil
+	}
+	h.senderOnce.Do(func() {
+		out, err := h.ssmClient.GetParameter(ctx, &ssm.GetParameterInput{
+			Name:           aws.String(h.fcmParam),
+			WithDecryption: aws.Bool(true),
+		})
+		if err != nil {
+			h.senderErr = fmt.Errorf("load fcm service account from %s: %w", h.fcmParam, err)
+			return
+		}
+		client, err := fcm.New(ctx, []byte(aws.ToString(out.Parameter.Value)))
+		if err != nil {
+			h.senderErr = fmt.Errorf("init fcm client: %w", err)
+			return
+		}
+		h.sender = client
+	})
+	return h.sender, h.senderErr
 }
 
 func (h *handler) handleBatch(ctx context.Context, ev events.SQSEvent) (events.SQSEventResponse, error) {
@@ -52,11 +105,127 @@ func (h *handler) handleBatch(ctx context.Context, ev events.SQSEvent) (events.S
 
 func (h *handler) handleRecord(ctx context.Context, record events.SQSMessage) error {
 	var task queue.PageTask
-	_ = task // build-out: unmarshal record.Body, then run the algorithm above
-	panic("not implemented")
+	if err := json.Unmarshal([]byte(record.Body), &task); err != nil {
+		// A malformed body can never succeed on redrive either; log and
+		// drop rather than poisoning the queue forever.
+		log.Printf("record %s: unmarshal page task: %v", record.MessageId, err)
+		return nil
+	}
+
+	page, err := h.store.GetPage(ctx, task.PageID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			log.Printf("page %s not found, dropping attempt %d", task.PageID, task.Attempt)
+			return nil
+		}
+		return fmt.Errorf("load page %s: %w", task.PageID, err)
+	}
+
+	if !page.State.Active() {
+		log.Printf("page %s state=%s inactive, dropping attempt %d", page.ID, page.State, task.Attempt)
+		return nil
+	}
+
+	activeStates := []model.PageState{model.PageCreated, model.PagePushed, model.PageDelivered, model.PageSeen}
+
+	now := time.Now()
+	if now.After(page.ExpiresAt) {
+		if err := h.store.SetPageState(ctx, page.ID, activeStates, model.PageExpired, page.Attempt); err != nil && !errors.Is(err, store.ErrConflict) {
+			return fmt.Errorf("expire page %s: %w", page.ID, err)
+		}
+		if err := h.store.AppendEvent(ctx, model.PageEvent{PageID: page.ID, Type: "expired", At: now}); err != nil {
+			log.Printf("page %s: failed to append expired event: %v", page.ID, err)
+		}
+		return nil
+	}
+
+	if page.Attempt >= task.Attempt {
+		log.Printf("page %s: attempt %d already ran (current %d), dropping duplicate", page.ID, task.Attempt, page.Attempt)
+		return nil
+	}
+
+	devices, err := h.store.ListDevices(ctx, page.RecipientID)
+	if err != nil {
+		return fmt.Errorf("list devices for %s: %w", page.RecipientID, err)
+	}
+
+	if len(devices) == 0 {
+		if err := h.store.AppendEvent(ctx, model.PageEvent{PageID: page.ID, Type: "no_devices", At: now}); err != nil {
+			log.Printf("page %s: failed to append no_devices event: %v", page.ID, err)
+		}
+	} else {
+		senderName := page.SenderID
+		if u, err := h.store.GetUser(ctx, page.SenderID); err == nil {
+			senderName = u.DisplayName
+		}
+
+		sender, err := h.getSender(ctx)
+		if err != nil {
+			return fmt.Errorf("push sender: %w", err)
+		}
+
+		notification := push.Notification{PageID: page.ID, Attempt: task.Attempt, SenderName: senderName}
+		for _, d := range devices {
+			if err := sender.Send(ctx, d, notification); err != nil {
+				if errors.Is(err, push.ErrTokenGone) {
+					if deleter, ok := h.store.(store.DeviceDeleter); ok {
+						if delErr := deleter.DeleteDevice(ctx, d.UserID, d.Token); delErr != nil {
+							log.Printf("page %s: failed to prune dead device %s: %v", page.ID, d.Token, delErr)
+						}
+					}
+					continue
+				}
+				log.Printf("page %s: push to device %s failed: %v", page.ID, d.Token, err)
+			}
+		}
+	}
+
+	// Move created→pushed (or re-affirm pushed) and bump the attempt
+	// counter; a losing condition means the page has already advanced to
+	// delivered/seen/acked/expired/cancelled, which must never regress.
+	pushFrom := []model.PageState{model.PageCreated, model.PagePushed}
+	if err := h.store.SetPageState(ctx, page.ID, pushFrom, model.PagePushed, task.Attempt); err != nil && !errors.Is(err, store.ErrConflict) {
+		return fmt.Errorf("set page %s pushed: %w", page.ID, err)
+	}
+	if err := h.store.AppendEvent(ctx, model.PageEvent{PageID: page.ID, Type: "push_attempt", At: now}); err != nil {
+		log.Printf("page %s: failed to append push_attempt event: %v", page.ID, err)
+	}
+
+	nextAttempt := task.Attempt + 1
+	if delay, ok := nag.NextDelay(nextAttempt); ok {
+		if err := h.queue.Enqueue(ctx, queue.PageTask{PageID: page.ID, Attempt: nextAttempt}, delay); err != nil {
+			return fmt.Errorf("enqueue attempt %d for page %s: %w", nextAttempt, page.ID, err)
+		}
+		return nil
+	}
+
+	// Schedule exhausted: if the page hasn't hit ExpiresAt yet, enqueue one
+	// last tick right at (or just before) the expiry boundary so step 2
+	// eventually marks it expired instead of nagging silently forever.
+	if now.Before(page.ExpiresAt) {
+		remaining := page.ExpiresAt.Sub(now)
+		if remaining > maxFinalDelay {
+			remaining = maxFinalDelay
+		}
+		if err := h.queue.Enqueue(ctx, queue.PageTask{PageID: page.ID, Attempt: nextAttempt}, remaining); err != nil {
+			return fmt.Errorf("enqueue final expiry tick for page %s: %w", page.ID, err)
+		}
+	}
+	return nil
 }
 
 func main() {
-	h := &handler{} // build-out: wire aws config, dynamo store, fcm, sqs
+	ctx := context.Background()
+	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		log.Fatalf("aws config: %v", err)
+	}
+
+	h := &handler{
+		store:     dynamo.New(dynamodb.NewFromConfig(cfg), os.Getenv("TABLE_NAME"), os.Getenv("GSI1_NAME"), os.Getenv("GSI2_NAME")),
+		queue:     queue.NewSQS(sqs.NewFromConfig(cfg), os.Getenv("QUEUE_URL")),
+		ssmClient: ssm.NewFromConfig(cfg),
+		fcmParam:  os.Getenv("FCM_SA_PARAM"),
+	}
 	lambda.Start(h.handleBatch)
 }

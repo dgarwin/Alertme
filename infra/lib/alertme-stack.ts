@@ -30,7 +30,9 @@ export class AlertmeStack extends cdk.Stack {
 
     // ------------------------------------------------------------------ data
     // Single-table design (see PLAN-AWS.md §3). GSI1 serves recipient inbox,
-    // history, and GET /pages?since polling.
+    // history, and GET /pages?since polling. GSI2 mirrors it for the sender
+    // side (ListPagesFor queries both and merges) so GET /pages?since also
+    // returns pages the caller sent, not just ones they received.
     const table = new dynamodb.TableV2(this, 'Table', {
       tableName: 'alertme',
       partitionKey: { name: 'PK', type: dynamodb.AttributeType.STRING },
@@ -43,6 +45,11 @@ export class AlertmeStack extends cdk.Stack {
           indexName: 'GSI1',
           partitionKey: { name: 'GSI1PK', type: dynamodb.AttributeType.STRING },
           sortKey: { name: 'GSI1SK', type: dynamodb.AttributeType.STRING },
+        },
+        {
+          indexName: 'GSI2',
+          partitionKey: { name: 'GSI2PK', type: dynamodb.AttributeType.STRING },
+          sortKey: { name: 'GSI2SK', type: dynamodb.AttributeType.STRING },
         },
       ],
       replicas: replicaRegions.map((region) => ({ region })),
@@ -101,6 +108,7 @@ export class AlertmeStack extends cdk.Stack {
         environment: {
           TABLE_NAME: table.tableName,
           GSI1_NAME: 'GSI1',
+          GSI2_NAME: 'GSI2',
           QUEUE_URL: queue.queueUrl,
           FCM_SA_PARAM,
           ...extraEnv,
@@ -160,6 +168,13 @@ export class AlertmeStack extends cdk.Stack {
       enabled: canaryEnabled,
     });
     canaryFn.addEnvironment('API_BASE_URL', httpApi.apiEndpoint);
+    canaryFn.addEnvironment('COGNITO_CLIENT_ID', userPoolClient.userPoolClientId);
+    // Bot credentials (BOT_A_USERNAME/PASSWORD, BOT_B_USERNAME/PASSWORD,
+    // BOT_B_USER_ID) and HEARTBEAT_URL are deliberately not set here — the
+    // canary logs and no-ops until they're provisioned out of band (see
+    // cmd/canary's header comment) and added via `canaryFn.addEnvironment`
+    // or the console once bot accounts exist.
+    userPool.grant(canaryFn, 'cognito-idp:InitiateAuth');
 
     // --------------------------------------------------------------- alarms
     const alarmTopic = new sns.Topic(this, 'Alarms', { topicName: 'alertme-alarms' });

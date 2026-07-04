@@ -55,3 +55,22 @@ type Store interface {
 	// newest-first, created after `since` (GSI1 query).
 	ListPagesFor(ctx context.Context, userID string, since time.Time) ([]model.Page, error)
 }
+
+// IdempotentPageLookup is an optional capability: implementations of Store
+// that persist the idempotency-key→page mapping (dynamo does, via the
+// IDEM# guard item) can expose it here so handleCreatePage can serve a
+// replayed create as a 200 with the original page, without CreatePage
+// itself needing to return the page on ErrConflict (which would change the
+// frozen Store interface). Callers type-assert for this; a Store without it
+// simply can't serve the idempotent-replay fast path.
+type IdempotentPageLookup interface {
+	GetPageByIdempotencyKey(ctx context.Context, key string) (model.Page, error)
+}
+
+// DeviceDeleter is an optional capability for pruning a device whose push
+// token FCM reports as no longer valid (push.ErrTokenGone). Device removal
+// isn't part of the frozen Store interface (which only ever upserts/lists
+// devices), so the pager worker type-asserts for this instead.
+type DeviceDeleter interface {
+	DeleteDevice(ctx context.Context, userID, token string) error
+}

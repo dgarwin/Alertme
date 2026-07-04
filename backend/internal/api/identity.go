@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"os"
 
 	"github.com/akrylysov/algnhsa"
 )
@@ -18,17 +19,30 @@ type Identity struct {
 }
 
 // withIdentity extracts Cognito claims from the API Gateway v2 request
-// context that algnhsa preserves on the request.
-//
-// IMPLEMENTATION NOTES: algnhsa.APIGatewayV2RequestFromContext →
-// req.RequestContext.Authorizer.JWT.Claims["sub"] / ["email"]. Reject with
-// 401 if absent (only happens when running locally without the gateway; a
-// DEV_USER_ID env fallback keeps local runs usable).
+// context that algnhsa preserves on the request. Locally (no gateway in
+// front of the handler, e.g. tests or `go run ./cmd/api`), DEV_USER_ID lets
+// requests through as that fixed user; otherwise unauthenticated requests
+// are rejected with 401.
 func withIdentity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, ok := algnhsa.APIGatewayV2RequestFromContext(r.Context())
-		_ = ok // TODO(build-out): extract claims per the note above
-		http.Error(w, "identity middleware not implemented", http.StatusNotImplemented)
+		if req, ok := algnhsa.APIGatewayV2RequestFromContext(r.Context()); ok &&
+			req.RequestContext.Authorizer != nil && req.RequestContext.Authorizer.JWT != nil {
+			claims := req.RequestContext.Authorizer.JWT.Claims
+			sub := claims["sub"]
+			if sub != "" {
+				ctx := context.WithValue(r.Context(), identityKey, Identity{UserID: sub, Email: claims["email"]})
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+		}
+
+		if devUser := os.Getenv("DEV_USER_ID"); devUser != "" {
+			ctx := context.WithValue(r.Context(), identityKey, Identity{UserID: devUser, Email: os.Getenv("DEV_USER_EMAIL")})
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	})
 }
 

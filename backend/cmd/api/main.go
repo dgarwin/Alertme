@@ -24,7 +24,7 @@ func main() {
 		log.Fatalf("aws config: %v", err)
 	}
 
-	st := dynamo.New(dynamodb.NewFromConfig(cfg), os.Getenv("TABLE_NAME"), os.Getenv("GSI1_NAME"))
+	st := dynamo.New(dynamodb.NewFromConfig(cfg), os.Getenv("TABLE_NAME"), os.Getenv("GSI1_NAME"), os.Getenv("GSI2_NAME"))
 	q := queue.NewSQS(sqs.NewFromConfig(cfg), os.Getenv("QUEUE_URL"))
 
 	server := api.New(st, q)
