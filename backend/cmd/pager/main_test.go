@@ -270,3 +270,46 @@ func TestFakeStoreConflictOnRegressiveSetPageState(t *testing.T) {
 		t.Fatalf("expected store.ErrConflict, got %v", err)
 	}
 }
+
+// Regression: a delivered (or seen) page keeps nagging, and each attempt must
+// still advance the attempt counter in place — without it, the step-3 dedup
+// guard can't suppress an SQS duplicate, which would fork a second nag chain.
+func TestHandleRecord_DeliveredPageRecordsAttemptForDedup(t *testing.T) {
+	st := fake.New()
+	ctx := context.Background()
+	pageID := "p7"
+	if err := st.CreatePage(ctx, model.Page{
+		ID: pageID, SenderID: "sender1", RecipientID: "recipient1", Message: "m",
+		State: model.PageDelivered, Attempt: 1, IdempotencyKey: "k7",
+		CreatedAt: time.Now().Add(-2 * time.Minute), ExpiresAt: time.Now().Add(28 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sender := &fakeSender{}
+	q := &fake.Enqueuer{}
+	h := &handler{store: st, queue: q, sender: sender}
+
+	if err := h.handleRecord(ctx, recordToBody(t, queue.PageTask{PageID: pageID, Attempt: 2})); err != nil {
+		t.Fatalf("handleRecord returned error: %v", err)
+	}
+
+	page, err := st.GetPage(ctx, pageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.State != model.PageDelivered {
+		t.Errorf("state must not regress from delivered, got %s", page.State)
+	}
+	if page.Attempt != 2 {
+		t.Errorf("attempt must advance to 2 on a delivered page, got %d", page.Attempt)
+	}
+
+	// The duplicate of attempt 2 must now be suppressed by the dedup guard.
+	if err := h.handleRecord(ctx, recordToBody(t, queue.PageTask{PageID: pageID, Attempt: 2})); err != nil {
+		t.Fatalf("duplicate handleRecord returned error: %v", err)
+	}
+	if got := len(q.Tasks); got != 1 {
+		t.Errorf("duplicate attempt must not re-enqueue: want 1 queued task, got %d", got)
+	}
+}

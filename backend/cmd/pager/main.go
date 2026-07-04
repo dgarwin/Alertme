@@ -180,12 +180,14 @@ func (h *handler) handleRecord(ctx context.Context, record events.SQSMessage) er
 		}
 	}
 
-	// Move created→pushed (or re-affirm pushed) and bump the attempt
-	// counter; a losing condition means the page has already advanced to
-	// delivered/seen/acked/expired/cancelled, which must never regress.
-	pushFrom := []model.PageState{model.PageCreated, model.PagePushed}
-	if err := h.store.SetPageState(ctx, page.ID, pushFrom, model.PagePushed, task.Attempt); err != nil && !errors.Is(err, store.ErrConflict) {
-		return fmt.Errorf("set page %s pushed: %w", page.ID, err)
+	// Record the attempt and move created→pushed. Delivered/seen pages keep
+	// nagging (delivered ≠ acknowledged) but must not regress state, so the
+	// attempt counter is bumped in-place for them — the step-3 dedup guard
+	// depends on it advancing every attempt, or an SQS duplicate would fork a
+	// second nag chain. Losing every condition means the page reached a
+	// terminal state between step 1 and here; nothing to record.
+	if err := h.recordAttempt(ctx, page.ID, task.Attempt); err != nil {
+		return err
 	}
 	if err := h.store.AppendEvent(ctx, model.PageEvent{PageID: page.ID, Type: "push_attempt", At: now}); err != nil {
 		log.Printf("page %s: failed to append push_attempt event: %v", page.ID, err)
@@ -212,6 +214,29 @@ func (h *handler) handleRecord(ctx context.Context, record events.SQSMessage) er
 		}
 	}
 	return nil
+}
+
+// recordAttempt bumps the attempt counter without ever regressing state:
+// created/pushed→pushed, else delivered→delivered, else seen→seen.
+func (h *handler) recordAttempt(ctx context.Context, pageID string, attempt int) error {
+	transitions := []struct {
+		from []model.PageState
+		to   model.PageState
+	}{
+		{[]model.PageState{model.PageCreated, model.PagePushed}, model.PagePushed},
+		{[]model.PageState{model.PageDelivered}, model.PageDelivered},
+		{[]model.PageState{model.PageSeen}, model.PageSeen},
+	}
+	for _, t := range transitions {
+		err := h.store.SetPageState(ctx, pageID, t.from, t.to, attempt)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, store.ErrConflict) {
+			return fmt.Errorf("record attempt %d on page %s: %w", attempt, pageID, err)
+		}
+	}
+	return nil // page reached a terminal state concurrently
 }
 
 func main() {
