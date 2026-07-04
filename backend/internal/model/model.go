@@ -42,10 +42,15 @@ type User struct {
 }
 
 type Device struct {
-	UserID    string    `json:"user_id"`
-	Token     string    `json:"token"` // FCM registration token
-	Platform  string    `json:"platform"` // "ios" | "android"
-	UpdatedAt time.Time `json:"updated_at"`
+	UserID string `json:"user_id"`
+	Token  string `json:"token"` // raw APNs/FCM device token
+	// EndpointARN is the SNS platform endpoint ARN created for this token at
+	// registration time. Empty when push isn't configured yet (or the
+	// platform application ARN wasn't set) — pager sends fail loudly and
+	// retry rather than silently no-op.
+	EndpointARN string    `json:"endpoint_arn,omitempty"`
+	Platform    string    `json:"platform"` // "ios" | "android"
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // Pairing is stored under BOTH users' partitions (written transactionally) so
@@ -65,17 +70,17 @@ type Invite struct {
 }
 
 type Page struct {
-	ID             string    `json:"id"`
-	SenderID       string    `json:"sender_id"`
-	RecipientID    string    `json:"recipient_id"`
-	Message        string    `json:"message"`
-	State          PageState `json:"state"`
-	Attempt        int       `json:"attempt"` // last push attempt number
-	IdempotencyKey string    `json:"-"`
-	CreatedAt      time.Time `json:"created_at"`
-	ExpiresAt      time.Time `json:"expires_at"`
+	ID             string     `json:"id"`
+	SenderID       string     `json:"sender_id"`
+	RecipientID    string     `json:"recipient_id"`
+	Message        string     `json:"message"`
+	State          PageState  `json:"state"`
+	Attempt        int        `json:"attempt"` // last push attempt number
+	IdempotencyKey string     `json:"-"`
+	CreatedAt      time.Time  `json:"created_at"`
+	ExpiresAt      time.Time  `json:"expires_at"`
 	AckedAt        *time.Time `json:"acked_at,omitempty"`
-	AckNote        string    `json:"ack_note,omitempty"` // "on my way", free text
+	AckNote        string     `json:"ack_note,omitempty"` // "on my way", free text
 }
 
 // PageEvent is the append-only timeline shown to the sender.

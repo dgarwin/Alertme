@@ -16,10 +16,6 @@ import * as cwactions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 
-// SSM parameter (SecureString, created out-of-band — see README) holding the
-// FCM service-account JSON used by the pager lambda to mint push tokens.
-const FCM_SA_PARAM = '/alertme/fcm-service-account';
-
 export class AlertmeStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
@@ -27,6 +23,11 @@ export class AlertmeStack extends cdk.Stack {
     const alertEmail: string = this.node.tryGetContext('alertEmail') ?? '';
     const replicaRegions: string[] = this.node.tryGetContext('replicaRegions') ?? [];
     const canaryEnabled: boolean = this.node.tryGetContext('canaryEnabled') ?? false;
+    // SNS platform applications (APNS + FCM) holding push credentials,
+    // created out-of-band — see PLAN-AWS.md §8. Empty = push disabled for
+    // that platform; the stack still deploys cleanly.
+    const apnsPlatformAppArn: string = this.node.tryGetContext('apnsPlatformAppArn') ?? '';
+    const fcmPlatformAppArn: string = this.node.tryGetContext('fcmPlatformAppArn') ?? '';
 
     // ------------------------------------------------------------------ data
     // Single-table design (see PLAN-AWS.md §3). GSI1 serves recipient inbox,
@@ -110,7 +111,6 @@ export class AlertmeStack extends cdk.Stack {
           GSI1_NAME: 'GSI1',
           GSI2_NAME: 'GSI2',
           QUEUE_URL: queue.queueUrl,
-          FCM_SA_PARAM,
           ...extraEnv,
         },
       });
@@ -118,6 +118,9 @@ export class AlertmeStack extends cdk.Stack {
     const apiFn = goFn('Api');
     const pagerFn = goFn('Pager');
     const canaryFn = goFn('Canary');
+
+    apiFn.addEnvironment('APNS_PLATFORM_APP_ARN', apnsPlatformAppArn);
+    apiFn.addEnvironment('FCM_PLATFORM_APP_ARN', fcmPlatformAppArn);
 
     table.grantReadWriteData(apiFn);
     table.grantReadWriteData(pagerFn);
@@ -129,12 +132,26 @@ export class AlertmeStack extends cdk.Stack {
         reportBatchItemFailures: true,
       })
     );
+    // Pager publishes to SNS platform endpoints (created by the api lambda
+    // at device-registration time) and prunes ones SNS reports as disabled.
+    // Endpoint ARNs are only known at runtime, so we scope to the SNS
+    // endpoint/ namespace when the platform apps are configured, else '*'.
     pagerFn.addToRolePolicy(
       new iam.PolicyStatement({
-        actions: ['ssm:GetParameter'],
-        resources: [
-          `arn:aws:ssm:${this.region}:${this.account}:parameter${FCM_SA_PARAM}`,
-        ],
+        actions: ['sns:Publish', 'sns:DeleteEndpoint'],
+        resources:
+          apnsPlatformAppArn && fcmPlatformAppArn
+            ? [`arn:aws:sns:${this.region}:${this.account}:endpoint/*`]
+            : ['*'],
+      })
+    );
+
+    // Api creates SNS platform endpoints at device registration.
+    const platformAppArns = [apnsPlatformAppArn, fcmPlatformAppArn].filter(Boolean);
+    apiFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['sns:CreatePlatformEndpoint'],
+        resources: platformAppArns.length ? platformAppArns : ['*'],
       })
     );
 

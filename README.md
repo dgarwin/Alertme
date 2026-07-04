@@ -28,8 +28,12 @@ npx cdk synth    # requires backend/dist to exist (make build first)
 ## Deploy
 
 1. `aws configure` / SSO into the target account; `npx cdk bootstrap` once.
-2. Create the FCM secret: a Firebase service account JSON stored at SSM
-   SecureString parameter `/alertme/fcm-service-account`.
+2. Create the SNS platform applications (they hold the push credentials, so
+   they live outside the CFN template — see PLAN-AWS.md §8): one `APNS` app
+   (Apple `.p8` token auth) and one `GCM`/FCM app (Firebase service-account
+   JSON). Put their ARNs in `apnsPlatformAppArn` / `fcmPlatformAppArn` in
+   `infra/cdk.json`. Empty = push disabled for that platform; the stack still
+   deploys and push no-ops.
 3. Set `alertEmail` in `infra/cdk.json` (alarm notifications).
 4. `cd backend && make build && cd ../infra && npx cdk deploy`.
 
@@ -44,7 +48,8 @@ once bot credentials exist (see `cmd/canary`).
 - [x] Domain model, single-table key schema, nag schedule (+tests)
 - [x] API routes wired with request/response contracts
 - [x] DynamoDB store implementation (`internal/store/dynamo`, +key-schema tests)
-- [x] FCM sender (`internal/push/fcm`)
+- [x] SNS mobile-push sender (`internal/push/sns`) — endpoints created at
+      device registration, published to by the pager
 - [x] Pager worker logic (`cmd/pager`, +tests against a fake store/sender)
 - [x] Handler implementations (`internal/api/handlers.go`, +tests against a
       fake store)

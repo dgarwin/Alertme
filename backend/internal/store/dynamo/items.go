@@ -53,22 +53,24 @@ func (r userRecord) toModel() (model.User, error) {
 }
 
 type deviceRecord struct {
-	PK        string `dynamodbav:"PK"`
-	SK        string `dynamodbav:"SK"`
-	UserID    string `dynamodbav:"user_id"`
-	Token     string `dynamodbav:"token"`
-	Platform  string `dynamodbav:"platform"`
-	UpdatedAt string `dynamodbav:"updated_at"`
+	PK          string `dynamodbav:"PK"`
+	SK          string `dynamodbav:"SK"`
+	UserID      string `dynamodbav:"user_id"`
+	Token       string `dynamodbav:"token"`
+	EndpointARN string `dynamodbav:"endpoint_arn"`
+	Platform    string `dynamodbav:"platform"`
+	UpdatedAt   string `dynamodbav:"updated_at"`
 }
 
 func newDeviceRecord(d model.Device) deviceRecord {
 	return deviceRecord{
-		PK:        userPK(d.UserID),
-		SK:        devicSK(d.Token),
-		UserID:    d.UserID,
-		Token:     d.Token,
-		Platform:  d.Platform,
-		UpdatedAt: fmtTime(d.UpdatedAt),
+		PK:          userPK(d.UserID),
+		SK:          devicSK(d.Token),
+		UserID:      d.UserID,
+		Token:       d.Token,
+		EndpointARN: d.EndpointARN,
+		Platform:    d.Platform,
+		UpdatedAt:   fmtTime(d.UpdatedAt),
 	}
 }
 
@@ -77,7 +79,7 @@ func (r deviceRecord) toModel() (model.Device, error) {
 	if err != nil {
 		return model.Device{}, fmt.Errorf("device %s: %w", r.Token, err)
 	}
-	return model.Device{UserID: r.UserID, Token: r.Token, Platform: r.Platform, UpdatedAt: updated}, nil
+	return model.Device{UserID: r.UserID, Token: r.Token, EndpointARN: r.EndpointARN, Platform: r.Platform, UpdatedAt: updated}, nil
 }
 
 type pairingRecord struct {

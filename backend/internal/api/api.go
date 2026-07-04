@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/dgarwin/alertme/backend/internal/push"
 	"github.com/dgarwin/alertme/backend/internal/queue"
 	"github.com/dgarwin/alertme/backend/internal/store"
 )
@@ -15,10 +16,11 @@ import (
 type Server struct {
 	store store.Store
 	queue queue.Enqueuer
+	reg   push.Registrar // may be nil (e.g. in tests) — device registration then stores no endpoint ARN
 }
 
-func New(st store.Store, q queue.Enqueuer) *Server {
-	return &Server{store: st, queue: q}
+func New(st store.Store, q queue.Enqueuer, reg push.Registrar) *Server {
+	return &Server{store: st, queue: q, reg: reg}
 }
 
 // Router wires the complete v1 API (8 routes + health).

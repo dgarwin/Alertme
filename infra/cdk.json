@@ -10,10 +10,14 @@
     "@aws-cdk/aws-iam:standardizedServicePrincipals": true,
 
     "// alertEmail": "email address that receives CloudWatch alarm notifications",
-    "alertEmail": "",
+    "alertEmail": "davidgarwin@gmail.com",
     "// replicaRegions": "extra regions for the DynamoDB global table, e.g. [\"us-west-2\"]. Empty = single region.",
     "replicaRegions": [],
     "// canaryEnabled": "turn on the 5-minute bot-pages-bot canary once implemented",
-    "canaryEnabled": false
+    "canaryEnabled": false,
+    "// apnsPlatformAppArn": "SNS platform application ARN for APNs (iOS). Created out-of-band; empty = push disabled for iOS.",
+    "apnsPlatformAppArn": "",
+    "// fcmPlatformAppArn": "SNS platform application ARN for FCM (Android). Created out-of-band; empty = push disabled for Android.",
+    "fcmPlatformAppArn": ""
   }
 }

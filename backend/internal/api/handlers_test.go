@@ -54,7 +54,7 @@ type pageEnvelope struct {
 func TestHandleCreatePage_HappyPath(t *testing.T) {
 	st := fake.New()
 	q := &fake.Enqueuer{}
-	srv := New(st, q)
+	srv := New(st, q, nil)
 	seedActivePairing(t, st, "sender1", "recipient1")
 	t.Setenv("DEV_USER_ID", "sender1")
 
@@ -87,7 +87,7 @@ func TestHandleCreatePage_HappyPath(t *testing.T) {
 func TestHandleCreatePage_IdempotentReplayReturns200SamePage(t *testing.T) {
 	st := fake.New()
 	q := &fake.Enqueuer{}
-	srv := New(st, q)
+	srv := New(st, q, nil)
 	seedActivePairing(t, st, "sender1", "recipient1")
 	t.Setenv("DEV_USER_ID", "sender1")
 
@@ -129,7 +129,7 @@ func TestHandleCreatePage_IdempotentReplayReturns200SamePage(t *testing.T) {
 func TestHandleCreatePage_BlockedPairingForbidden(t *testing.T) {
 	st := fake.New()
 	q := &fake.Enqueuer{}
-	srv := New(st, q)
+	srv := New(st, q, nil)
 	seedActivePairing(t, st, "sender1", "recipient1")
 	if err := st.BlockPairing(context.Background(), "sender1", "recipient1"); err != nil {
 		t.Fatal(err)
@@ -152,7 +152,7 @@ func TestHandleCreatePage_BlockedPairingForbidden(t *testing.T) {
 func TestHandleCreatePage_NoPairingForbidden(t *testing.T) {
 	st := fake.New()
 	q := &fake.Enqueuer{}
-	srv := New(st, q)
+	srv := New(st, q, nil)
 	if err := st.PutUser(context.Background(), model.User{ID: "sender1", DisplayName: "S", CreatedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func createTestPage(t *testing.T, srv *Server, idempotencyKey string) model.Page
 func TestHandleAckPage_SecondAckIsIdempotent(t *testing.T) {
 	st := fake.New()
 	q := &fake.Enqueuer{}
-	srv := New(st, q)
+	srv := New(st, q, nil)
 	seedActivePairing(t, st, "sender1", "recipient1")
 	page := createTestPage(t, srv, "ack-key-1")
 
@@ -229,7 +229,7 @@ func TestHandleAckPage_SecondAckIsIdempotent(t *testing.T) {
 func TestHandleDeliveredReceipt_NeverRegressesAcked(t *testing.T) {
 	st := fake.New()
 	q := &fake.Enqueuer{}
-	srv := New(st, q)
+	srv := New(st, q, nil)
 	seedActivePairing(t, st, "sender1", "recipient1")
 	page := createTestPage(t, srv, "delivered-key-1")
 

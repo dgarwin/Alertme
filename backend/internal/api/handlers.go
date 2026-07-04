@@ -12,6 +12,7 @@ import (
 
 	"github.com/dgarwin/alertme/backend/internal/model"
 	"github.com/dgarwin/alertme/backend/internal/nag"
+	"github.com/dgarwin/alertme/backend/internal/push"
 	"github.com/dgarwin/alertme/backend/internal/queue"
 	"github.com/dgarwin/alertme/backend/internal/store"
 )
@@ -90,6 +91,18 @@ func (s *Server) handleRegisterDevice(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dev := model.Device{UserID: id.UserID, Token: body.Token, Platform: body.Platform, UpdatedAt: time.Now()}
+	if s.reg != nil {
+		arn, err := s.reg.Register(r.Context(), body.Platform, body.Token)
+		switch {
+		case err == nil:
+			dev.EndpointARN = arn
+		case errors.Is(err, push.ErrPushNotConfigured):
+			log.Printf("device %s: push not configured for platform %s, storing without endpoint ARN", id.UserID, body.Platform)
+		default:
+			mapStoreErr(w, err)
+			return
+		}
+	}
 	if err := s.store.PutDevice(r.Context(), dev); err != nil {
 		mapStoreErr(w, err)
 		return

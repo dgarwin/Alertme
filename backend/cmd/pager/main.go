@@ -31,21 +31,19 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
-	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	snsclient "github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
-	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
 	"github.com/dgarwin/alertme/backend/internal/model"
 	"github.com/dgarwin/alertme/backend/internal/nag"
 	"github.com/dgarwin/alertme/backend/internal/push"
-	"github.com/dgarwin/alertme/backend/internal/push/fcm"
+	"github.com/dgarwin/alertme/backend/internal/push/sns"
 	"github.com/dgarwin/alertme/backend/internal/queue"
 	"github.com/dgarwin/alertme/backend/internal/store"
 	"github.com/dgarwin/alertme/backend/internal/store/dynamo"
@@ -59,36 +57,7 @@ type handler struct {
 	store store.Store
 	queue queue.Enqueuer
 
-	// FCM credentials come from SSM and are fetched once per cold start.
-	ssmClient *ssm.Client
-	fcmParam  string
-
-	senderOnce sync.Once
-	sender     push.Sender // pre-set (e.g. by tests) to skip the SSM/FCM lazy init entirely
-	senderErr  error
-}
-
-func (h *handler) getSender(ctx context.Context) (push.Sender, error) {
-	if h.sender != nil {
-		return h.sender, nil
-	}
-	h.senderOnce.Do(func() {
-		out, err := h.ssmClient.GetParameter(ctx, &ssm.GetParameterInput{
-			Name:           aws.String(h.fcmParam),
-			WithDecryption: aws.Bool(true),
-		})
-		if err != nil {
-			h.senderErr = fmt.Errorf("load fcm service account from %s: %w", h.fcmParam, err)
-			return
-		}
-		client, err := fcm.New(ctx, []byte(aws.ToString(out.Parameter.Value)))
-		if err != nil {
-			h.senderErr = fmt.Errorf("init fcm client: %w", err)
-			return
-		}
-		h.sender = client
-	})
-	return h.sender, h.senderErr
+	sender push.Sender // built once in main(); tests set this directly
 }
 
 func (h *handler) handleBatch(ctx context.Context, ev events.SQSEvent) (events.SQSEventResponse, error) {
@@ -159,14 +128,13 @@ func (h *handler) handleRecord(ctx context.Context, record events.SQSMessage) er
 			senderName = u.DisplayName
 		}
 
-		sender, err := h.getSender(ctx)
-		if err != nil {
-			return fmt.Errorf("push sender: %w", err)
+		if h.sender == nil {
+			return fmt.Errorf("push sender not configured")
 		}
 
 		notification := push.Notification{PageID: page.ID, Attempt: task.Attempt, SenderName: senderName}
 		for _, d := range devices {
-			if err := sender.Send(ctx, d, notification); err != nil {
+			if err := h.sender.Send(ctx, d, notification); err != nil {
 				if errors.Is(err, push.ErrTokenGone) {
 					if deleter, ok := h.store.(store.DeviceDeleter); ok {
 						if delErr := deleter.DeleteDevice(ctx, d.UserID, d.Token); delErr != nil {
@@ -247,10 +215,9 @@ func main() {
 	}
 
 	h := &handler{
-		store:     dynamo.New(dynamodb.NewFromConfig(cfg), os.Getenv("TABLE_NAME"), os.Getenv("GSI1_NAME"), os.Getenv("GSI2_NAME")),
-		queue:     queue.NewSQS(sqs.NewFromConfig(cfg), os.Getenv("QUEUE_URL")),
-		ssmClient: ssm.NewFromConfig(cfg),
-		fcmParam:  os.Getenv("FCM_SA_PARAM"),
+		store:  dynamo.New(dynamodb.NewFromConfig(cfg), os.Getenv("TABLE_NAME"), os.Getenv("GSI1_NAME"), os.Getenv("GSI2_NAME")),
+		queue:  queue.NewSQS(sqs.NewFromConfig(cfg), os.Getenv("QUEUE_URL")),
+		sender: sns.New(snsclient.NewFromConfig(cfg)),
 	}
 	lambda.Start(h.handleBatch)
 }

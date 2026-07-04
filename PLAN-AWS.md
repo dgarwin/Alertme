@@ -13,6 +13,10 @@ we'd otherwise own (auth, scheduling, scaling, failover, replication).
 > — the database instance ($28) and, because DynamoDB needs no VPC, the NAT
 > instances ($13.50) — and upgraded multi-region from pilot-light to an
 > active-active data layer. The price is query flexibility, covered in §3.
+>
+> **Push revision (v2.1):** direct FCM HTTP v1 is replaced by **SNS mobile
+> push** — see §8. Our code now only calls `sns:Publish` under its IAM role;
+> no Google OAuth, no service-account JSON at runtime.
 
 ---
 
@@ -51,8 +55,9 @@ api Lambda (Go, whole REST API — no VPC)
    │            └── SQS delay queue ──► pager Lambda (Go)
    ▼                    ▲    │                 │           │
 DynamoDB                └────┘                 ▼           ▼
-(global table,         re-enqueue        DynamoDB      FCM → APNs/FCM
- 3-AZ, PITR, TTL)      next nag          (state)       (both platforms)
+(global table,         re-enqueue        DynamoDB    SNS mobile push
+ 3-AZ, PITR, TTL)      next nag          (state)     ├─► APNs (iOS)
+                                                     └─► FCM (Android)
 ```
 
 ### Service by service
@@ -72,10 +77,13 @@ DynamoDB                └────┘                 ▼           ▼
 - **DynamoDB, on-demand, single table** (see §3), PITR on, **TTL** on invites
   and expired page items — the lean plan's "auto-purge after retention window"
   becomes a table setting instead of a cron job.
-- **Push:** FCM HTTP v1 for both platforms (free), unchanged.
-- **SSM Parameter Store** (free) for the FCM key; no DB credentials to store —
-  DynamoDB access is the Lambda's **IAM role**, so there is no database
-  password anywhere in the system.
+- **Push: SNS mobile push** (see §8) — device registration creates an SNS
+  **platform endpoint**; the pager publishes to it with `sns:Publish`. SNS
+  fronts APNs directly for iOS and FCM for Android. $0.50/M publishes.
+- **No push credentials in our runtime** — publish auth is the Lambda's IAM
+  role, matching DynamoDB: no database password and no Google service-account
+  JSON anywhere in the system. The APNs/FCM platform credentials live in the
+  two SNS platform applications, configured once out of band.
 - **IaC:** one CDK (TypeScript) stack, now ~250 lines. GitHub Actions + OIDC;
   `cdk deploy` releases, Lambda versioning rolls back.
 
@@ -188,8 +196,66 @@ before anything needs rethinking.
 | Query flexibility | full SQL | known patterns + Athena-on-export |
 | $/mo | ~48.50 | ~9 |
 
-Unchanged: Flutter app, FCM-only push, Cognito auth, SQS nag scheduler,
-invite-link pairing, idempotent acks, delivery receipts, event-sourced
-timeline. Go code ~1,200–1,800 lines across two Lambdas + ~250 lines CDK.
-Build order still: **prove the SQS nag loop with `curl` and two phones before
-any UI.**
+Unchanged: Flutter app, Cognito auth, SQS nag scheduler, invite-link pairing,
+idempotent acks, delivery receipts, event-sourced timeline. Go code
+~1,200–1,800 lines across two Lambdas + ~250 lines CDK. Build order still:
+**prove the SQS nag loop with `curl` and two phones before any UI.**
+
+---
+
+## 8. Push revision (v2.1): FCM HTTP v1 → SNS mobile push
+
+The original plan called FCM directly from the pager Lambda, which meant a
+Google OAuth client in Go, a Firebase service-account JSON in SSM, and a
+runtime dependency on `fcm.googleapis.com` auth. Moving delivery behind
+**SNS mobile push** makes push look like every other AWS call in the system.
+
+**How it works:** two **SNS platform applications** (one APNS, one FCM) hold
+the platform credentials. When the app registers a device token
+(`POST /devices`), the api Lambda calls `sns:CreatePlatformEndpoint` for the
+matching platform application and stores the returned **endpoint ARN** on the
+device item (alongside the raw token). To alert, the pager calls
+`sns:Publish` against the endpoint ARN with `MessageStructure=json`, carrying
+the same per-platform payloads as before (APNs `time-sensitive` interruption
+level, custom sound, thread-id; FCM high priority + data keys). A publish
+that returns `EndpointDisabled` plays the role FCM's `UNREGISTERED` did: the
+device is pruned.
+
+**What this deletes / adds:**
+
+| | before (FCM direct) | after (SNS) |
+|---|---|---|
+| Runtime auth | Google OAuth token minting | Lambda IAM role |
+| Secret at runtime | service-account JSON via SSM | none |
+| Go dependencies | `golang.org/x/oauth2` + hand-rolled HTTP client | AWS SDK `sns` client |
+| iOS path | app → FCM → APNs | app → APNs (Firebase drops out of iOS entirely) |
+| Device record | raw token | raw token + endpoint ARN |
+| Retry/backoff | ours | SNS's |
+
+**The honest caveat:** Google does not allow third parties to deliver to
+Android devices except through FCM, so on Android SNS is a front for FCM —
+the transport doesn't change, only who talks to it. The win is operational:
+the Firebase credential is configured once on the platform application
+instead of being fetched, parsed, and exchanged for OAuth tokens on every
+cold start of our code.
+
+**Credentials, once, out of band** (exactly like the old SSM parameter, but
+now consumed by SNS instead of our Lambda):
+- **APNS platform application:** Apple `.p8` signing key + key ID + team ID
+  + bundle ID (token-based auth; needs the Apple Developer account).
+- **FCM platform application:** the same Firebase service-account JSON as
+  before (SNS supports FCM HTTP v1 token auth).
+
+Because these are secrets, the platform applications are created by CLI or
+console — not in the CFN template, where credentials would be stored in
+plaintext — and their ARNs are passed to the stack as CDK context (like
+`alertEmail`). Until they exist, the stack deploys fine and push no-ops with
+a logged warning, same as the canary's missing-credentials behavior.
+
+**Multi-region note:** platform applications and endpoint ARNs are regional.
+Since the device item keeps the raw token, a region-B stack lazily creates
+its own endpoints on first use (`CreatePlatformEndpoint` is idempotent for
+the same token) — no data-model change needed for the warm-standby story.
+
+**Cost:** $0.50 per million publishes; at our volume ~$0.00. The cost sheet
+in §6 is unchanged.

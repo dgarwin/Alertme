@@ -10,9 +10,11 @@ import (
 	"github.com/akrylysov/algnhsa"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	snsclient "github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 
 	"github.com/dgarwin/alertme/backend/internal/api"
+	"github.com/dgarwin/alertme/backend/internal/push/sns"
 	"github.com/dgarwin/alertme/backend/internal/queue"
 	"github.com/dgarwin/alertme/backend/internal/store/dynamo"
 )
@@ -26,8 +28,12 @@ func main() {
 
 	st := dynamo.New(dynamodb.NewFromConfig(cfg), os.Getenv("TABLE_NAME"), os.Getenv("GSI1_NAME"), os.Getenv("GSI2_NAME"))
 	q := queue.NewSQS(sqs.NewFromConfig(cfg), os.Getenv("QUEUE_URL"))
+	// Either ARN may be empty until the corresponding SNS platform application
+	// is created out of band; Register degrades to ErrPushNotConfigured for
+	// that platform rather than failing device registration.
+	reg := sns.NewRegistrar(snsclient.NewFromConfig(cfg), os.Getenv("APNS_PLATFORM_APP_ARN"), os.Getenv("FCM_PLATFORM_APP_ARN"))
 
-	server := api.New(st, q)
+	server := api.New(st, q, reg)
 	algnhsa.ListenAndServe(server.Router(), &algnhsa.Options{
 		RequestType: algnhsa.RequestTypeAPIGatewayV2,
 	})

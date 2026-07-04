@@ -152,7 +152,8 @@ func (s *Store) ListDevices(ctx context.Context, userID string) ([]model.Device,
 }
 
 // DeleteDevice implements store.DeviceDeleter (see its doc comment): the
-// pager prunes a device once FCM reports its token is no longer valid.
+// pager prunes a device once the push provider reports its token/endpoint is
+// no longer valid.
 func (s *Store) DeleteDevice(ctx context.Context, userID, token string) error {
 	_, err := s.db.DeleteItem(ctx, &dynamodb.DeleteItemInput{
 		TableName: aws.String(s.table),
