@@ -223,11 +223,13 @@ export class AlertmeStack extends cdk.Stack {
       senders?: string[];
       recipientUserId?: string;
       gmailSecretName?: string;
+      searchWindow?: string; // Gmail newer_than, e.g. "2d", "30d"
     } = this.node.tryGetContext('mailWatch') ?? {};
     const mailwatchFn = goFn('Mailwatch', {
       MAIL_SENDERS: (mailWatch.senders ?? []).join(','),
       RECIPIENT_USER_ID: mailWatch.recipientUserId ?? '',
       GMAIL_SECRET_ID: mailWatch.gmailSecretName ?? 'alertme/gmail-oauth',
+      SEARCH_WINDOW: mailWatch.searchWindow ?? '2d',
     });
     table.grantReadWriteData(mailwatchFn);
     queue.grantSendMessages(mailwatchFn);

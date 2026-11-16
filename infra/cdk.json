@@ -19,7 +19,8 @@
       "enabled": true,
       "senders": ["roroproductions@yahoo.com", "roystonswing@gmail.com"],
       "recipientUserId": "41ebf560-f061-7025-db7a-cab8151fc173",
-      "gmailSecretName": "alertme/gmail-oauth"
+      "gmailSecretName": "alertme/gmail-oauth",
+      "searchWindow": "30d"
     },
     "canaryEnabled": false,
     "// apnsPlatformAppArn": "SNS platform application ARN for APNs (iOS). Created out-of-band; empty = push disabled for iOS.",

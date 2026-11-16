@@ -114,8 +114,8 @@ once bot credentials exist (see `cmd/canary`).
 ## Mail watch (email → page)
 
 `alertme-mailwatch` runs every 10 minutes (EventBridge), searches Gmail for
-**unread** mail from the senders in `cdk.json` → `mailWatch.senders` (last 2
-days), and pages `mailWatch.recipientUserId` once per message, from an
+**unread** mail from the senders in `cdk.json` → `mailWatch.senders` (last `mailWatch.searchWindow`,
+default 2d), and pages `mailWatch.recipientUserId` once per message, from an
 "AlertMe Mail" bot that pairs itself with the recipient on first run. The
 Gmail message id is the page's idempotency key, so a message that stays
 unread never pages twice. Access is OAuth **gmail.readonly** — the job can't
