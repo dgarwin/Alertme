@@ -291,3 +291,27 @@ func TestInviteAccept_FreshUsers(t *testing.T) {
 		t.Errorf("unexpected pairing: %+v", resp.Pairing)
 	}
 }
+
+// Regression: blocking is recorded on the blocker's (recipient's) copy of the
+// pairing only; the sender's copy stays active. Sending must still be refused.
+func TestHandleCreatePage_RecipientBlockedSenderForbidden(t *testing.T) {
+	st := fake.New()
+	srv := New(st, &fake.Enqueuer{}, nil)
+	seedActivePairing(t, st, "sender1", "recipient1")
+
+	t.Setenv("DEV_USER_ID", "recipient1")
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/pairings/sender1/block", nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("block: expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	t.Setenv("DEV_USER_ID", "sender1")
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/pages", jsonBody(map[string]string{
+		"recipient_id": "recipient1", "message": "hi", "idempotency_key": "k-blocked",
+	})))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 after recipient blocked sender, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

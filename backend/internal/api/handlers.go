@@ -252,6 +252,18 @@ func (s *Server) handleCreatePage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "pairing is blocked", http.StatusForbidden)
 		return
 	}
+	// Blocking is one-sided: POST /pairings/{peer}/block only flips the
+	// blocker's own copy. So the recipient's copy must be checked too, or a
+	// blocked sender could keep paging.
+	reverse, err := s.store.GetPairing(r.Context(), body.RecipientID, id.UserID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		mapStoreErr(w, err)
+		return
+	}
+	if err == nil && reverse.Status != model.PairingActive {
+		http.Error(w, "pairing is blocked", http.StatusForbidden)
+		return
+	}
 
 	now := time.Now()
 	page := model.Page{
