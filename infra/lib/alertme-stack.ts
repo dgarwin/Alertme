@@ -16,6 +16,7 @@ import * as cwactions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import { SnsPlatformApp } from './sns-platform-app';
 
 export class AlertmeStack extends cdk.Stack {
@@ -245,5 +246,18 @@ export class AlertmeStack extends cdk.Stack {
     if (fcmPlatformAppArn) {
       new cdk.CfnOutput(this, 'FcmPlatformAppArn', { value: fcmPlatformAppArn });
     }
+
+    // -------------------------------------------------------- app downloads
+    // Private bucket for sideloading test builds (APKs) via short-lived
+    // presigned URLs. No public access; objects expire after 30 days.
+    const downloads = new s3.Bucket(this, 'AppDownloads', {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      lifecycleRules: [{ expiration: cdk.Duration.days(30) }],
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+    });
+    new cdk.CfnOutput(this, 'AppDownloadsBucket', { value: downloads.bucketName });
   }
 }
