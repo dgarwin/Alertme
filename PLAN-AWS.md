@@ -246,10 +246,16 @@ now consumed by SNS instead of our Lambda):
 - **FCM platform application:** the same Firebase service-account JSON as
   before (SNS supports FCM HTTP v1 token auth).
 
-Because these are secrets, the platform applications are created by CLI or
-console — not in the CFN template, where credentials would be stored in
-plaintext — and their ARNs are passed to the stack as CDK context (like
-`alertEmail`). Until they exist, the stack deploys fine and push no-ops with
+Because these are secrets, they must not sit in the CFN template in
+plaintext, and CloudFormation has no native SNS platform-application
+resource anyway. **FCM** is therefore owned by the stack through a custom
+resource (`infra/lib/sns-platform-app.ts`): the template carries only the
+ARN of a Secrets Manager secret (`alertme/fcm-service-account`, value set out
+of band), and the handler Lambda reads it at deploy time and calls
+`CreatePlatformApplication` / `SetPlatformApplicationAttributes`. The Google
+side (Firebase app, service account, FCM role) is Terraform in `infra/gcp/`.
+**APNS** is still created by CLI/console and its ARN passed as CDK context.
+Until a platform is configured, the stack deploys fine and push no-ops with
 a logged warning, same as the canary's missing-credentials behavior.
 
 **Multi-region note:** platform applications and endpoint ARNs are regional.

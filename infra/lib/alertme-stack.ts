@@ -15,6 +15,8 @@ import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cwactions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import { SnsPlatformApp } from './sns-platform-app';
 
 export class AlertmeStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -23,11 +25,29 @@ export class AlertmeStack extends cdk.Stack {
     const alertEmail: string = this.node.tryGetContext('alertEmail') ?? '';
     const replicaRegions: string[] = this.node.tryGetContext('replicaRegions') ?? [];
     const canaryEnabled: boolean = this.node.tryGetContext('canaryEnabled') ?? false;
-    // SNS platform applications (APNS + FCM) holding push credentials,
-    // created out-of-band — see PLAN-AWS.md §8. Empty = push disabled for
-    // that platform; the stack still deploys cleanly.
+    // SNS platform applications (APNS + FCM) holding push credentials — see
+    // PLAN-AWS.md §8. APNS is still created out-of-band (ARN via context).
+    // FCM is owned by this stack: a custom resource creates it from a
+    // Secrets Manager secret whose *value* is set out of band (README
+    // "Rotating the FCM credential"), so no credential is ever in the repo
+    // or template. Empty = push disabled for that platform; the stack still
+    // deploys cleanly.
     const apnsPlatformAppArn: string = this.node.tryGetContext('apnsPlatformAppArn') ?? '';
-    const fcmPlatformAppArn: string = this.node.tryGetContext('fcmPlatformAppArn') ?? '';
+    const fcmCredentialSecretName: string = this.node.tryGetContext('fcmCredentialSecretName') ?? '';
+    const fcmPlatformAppName: string = this.node.tryGetContext('fcmPlatformAppName') ?? 'alertme-fcm';
+    const fcmCredentialRotation: string = String(this.node.tryGetContext('fcmCredentialRotation') ?? '');
+    const fcmPlatformAppArn: string = fcmCredentialSecretName
+      ? new SnsPlatformApp(this, 'FcmPlatformApp', {
+          name: fcmPlatformAppName,
+          platform: 'GCM',
+          credentialSecret: secretsmanager.Secret.fromSecretNameV2(
+            this,
+            'FcmCredential',
+            fcmCredentialSecretName
+          ),
+          rotation: fcmCredentialRotation,
+        }).arn
+      : '';
 
     // ------------------------------------------------------------------ data
     // Single-table design (see PLAN-AWS.md §3). GSI1 serves recipient inbox,
@@ -135,19 +155,18 @@ export class AlertmeStack extends cdk.Stack {
     // Pager publishes to SNS platform endpoints (created by the api lambda
     // at device-registration time) and prunes ones SNS reports as disabled.
     // Endpoint ARNs are only known at runtime, so we scope to the SNS
-    // endpoint/ namespace when the platform apps are configured, else '*'.
+    // endpoint/ namespace when any platform app is configured, else '*'.
+    const platformAppArns = [apnsPlatformAppArn, fcmPlatformAppArn].filter(Boolean);
     pagerFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['sns:Publish', 'sns:DeleteEndpoint'],
-        resources:
-          apnsPlatformAppArn && fcmPlatformAppArn
-            ? [`arn:aws:sns:${this.region}:${this.account}:endpoint/*`]
-            : ['*'],
+        resources: platformAppArns.length
+          ? [`arn:aws:sns:${this.region}:${this.account}:endpoint/*`]
+          : ['*'],
       })
     );
 
     // Api creates SNS platform endpoints at device registration.
-    const platformAppArns = [apnsPlatformAppArn, fcmPlatformAppArn].filter(Boolean);
     apiFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['sns:CreatePlatformEndpoint'],
@@ -222,5 +241,8 @@ export class AlertmeStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'UserPoolClientId', {
       value: userPoolClient.userPoolClientId,
     });
+    if (fcmPlatformAppArn) {
+      new cdk.CfnOutput(this, 'FcmPlatformAppArn', { value: fcmPlatformAppArn });
+    }
   }
 }

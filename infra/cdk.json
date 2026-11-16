@@ -17,7 +17,11 @@
     "canaryEnabled": false,
     "// apnsPlatformAppArn": "SNS platform application ARN for APNs (iOS). Created out-of-band; empty = push disabled for iOS.",
     "apnsPlatformAppArn": "",
-    "// fcmPlatformAppArn": "SNS platform application ARN for FCM (Android). Created out-of-band; empty = push disabled for Android.",
-    "fcmPlatformAppArn": ""
+    "// fcmCredentialSecretName": "Secrets Manager secret holding the Firebase service-account JSON (value set out of band, see README). The stack creates the FCM SNS platform app from it. Empty = push disabled for Android.",
+    "fcmCredentialSecretName": "alertme/fcm-service-account",
+    "// fcmPlatformAppName": "Name of the stack-managed FCM SNS platform application. Changing it replaces the app (new ARN; device endpoints re-register).",
+    "fcmPlatformAppName": "alertme-fcm-v2",
+    "// fcmCredentialRotation": "Bump after putting a new key in the secret; the next deploy pushes it to SNS in place (same ARN).",
+    "fcmCredentialRotation": "1"
   }
 }
