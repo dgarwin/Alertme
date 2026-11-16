@@ -50,8 +50,14 @@ class _IncomingScreenState extends State<IncomingScreen> {
     setState(() => _busy = true);
     try {
       final page = await Api.instance.ack(widget.pageId, note: note ?? _note.text.trim());
-      await Push.dismiss(widget.pageId);
       if (mounted) setState(() => _page = page);
+      // The ack succeeded server-side; failing to clear the local alarm must
+      // not be reported as a failed ack.
+      try {
+        await Push.dismiss(widget.pageId);
+      } catch (e) {
+        debugPrint('dismiss notification failed: $e');
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ack failed: $e')));

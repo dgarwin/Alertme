@@ -248,16 +248,37 @@ export class AlertmeStack extends cdk.Stack {
     }
 
     // -------------------------------------------------------- app downloads
-    // Private bucket for sideloading test builds (APKs) via short-lived
-    // presigned URLs. No public access; objects expire after 30 days.
+    // Bucket for sideloading Android builds. Objects under android/ are
+    // publicly readable (GetObject only — no listing, no writes) so the APK
+    // can be shared with a plain link:
+    //   android/AlertMe.apk        latest build, stable URL, never expires
+    //   android/builds/<ts>.apk    dated copies, expire after 90 days
+    // Everything else in the bucket stays private. The APK holds no secrets
+    // (API URL, Cognito client id and Firebase config are all public values).
     const downloads = new s3.Bucket(this, 'AppDownloads', {
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      blockPublicAccess: new s3.BlockPublicAccess({
+        blockPublicAcls: true,
+        ignorePublicAcls: true,
+        blockPublicPolicy: false,
+        restrictPublicBuckets: false,
+      }),
       encryption: s3.BucketEncryption.S3_MANAGED,
       enforceSSL: true,
-      lifecycleRules: [{ expiration: cdk.Duration.days(30) }],
+      lifecycleRules: [{ prefix: 'android/builds/', expiration: cdk.Duration.days(90) }],
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
     });
+    downloads.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: 'PublicReadAndroidBuilds',
+        actions: ['s3:GetObject'],
+        principals: [new iam.AnyPrincipal()],
+        resources: [downloads.arnForObjects('android/*')],
+      })
+    );
     new cdk.CfnOutput(this, 'AppDownloadsBucket', { value: downloads.bucketName });
+    new cdk.CfnOutput(this, 'AndroidApkUrl', {
+      value: `https://${downloads.bucketRegionalDomainName}/android/AlertMe.apk`,
+    });
   }
 }

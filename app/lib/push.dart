@@ -133,5 +133,13 @@ class Push {
   }
 
   /// Stop the alarm for a page (after ack).
-  static Future<void> dismiss(String pageId) => _notifications.cancel(_notificationId(pageId));
+  /// Never throws: a failure to clear the local alarm must not mask the
+  /// result of the server-side ack.
+  static Future<void> dismiss(String pageId) async {
+    try {
+      await _notifications.cancel(_notificationId(pageId));
+    } catch (e) {
+      debugPrint('cancel notification $pageId failed: $e');
+    }
+  }
 }
