@@ -214,6 +214,40 @@ export class AlertmeStack extends cdk.Stack {
     // or the console once bot accounts exist.
     userPool.grant(canaryFn, 'cognito-idp:InitiateAuth');
 
+    // ------------------------------------------------------------ mailwatch
+    // Every 10 minutes: Gmail (read-only OAuth) → page for unread mail from
+    // configured senders. The credential secret's *value* is written out of
+    // band by tools/gmail-oauth-setup.py; until then each run is a no-op.
+    const mailWatch: {
+      enabled?: boolean;
+      senders?: string[];
+      recipientUserId?: string;
+      gmailSecretName?: string;
+    } = this.node.tryGetContext('mailWatch') ?? {};
+    const mailwatchFn = goFn('Mailwatch', {
+      MAIL_SENDERS: (mailWatch.senders ?? []).join(','),
+      RECIPIENT_USER_ID: mailWatch.recipientUserId ?? '',
+      GMAIL_SECRET_ID: mailWatch.gmailSecretName ?? 'alertme/gmail-oauth',
+    });
+    table.grantReadWriteData(mailwatchFn);
+    queue.grantSendMessages(mailwatchFn);
+    mailwatchFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        // Secrets Manager appends a random 6-char suffix to secret ARNs.
+        resources: [
+          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:${
+            mailWatch.gmailSecretName ?? 'alertme/gmail-oauth'
+          }-??????`,
+        ],
+      })
+    );
+    new events.Rule(this, 'MailwatchSchedule', {
+      schedule: events.Schedule.rate(cdk.Duration.minutes(10)),
+      targets: [new targets.LambdaFunction(mailwatchFn, { retryAttempts: 0 })],
+      enabled: mailWatch.enabled ?? false,
+    });
+
     // --------------------------------------------------------------- alarms
     const alarmTopic = new sns.Topic(this, 'Alarms', { topicName: 'alertme-alarms' });
     if (alertEmail) {
@@ -234,6 +268,14 @@ export class AlertmeStack extends cdk.Stack {
     alarm('DlqAlarm', dlq.metricApproximateNumberOfMessagesVisible(), 1);
     alarm('PagerErrors', pagerFn.metricErrors({ period: cdk.Duration.minutes(5) }), 1);
     alarm('Api5xx', httpApi.metricServerError({ period: cdk.Duration.minutes(5) }), 5);
+    // Two failed runs in a row (e.g. Gmail token revoked → re-run setup).
+    new cloudwatch.Alarm(this, 'MailwatchErrors', {
+      metric: mailwatchFn.metricErrors({ period: cdk.Duration.minutes(10) }),
+      threshold: 1,
+      evaluationPeriods: 2,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(new cwactions.SnsAction(alarmTopic));
 
     // -------------------------------------------------------------- outputs
     new cdk.CfnOutput(this, 'ApiUrl', { value: httpApi.apiEndpoint });

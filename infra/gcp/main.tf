@@ -12,6 +12,7 @@ locals {
   apis = toset([
     "firebase.googleapis.com",
     "fcm.googleapis.com",
+    "gmail.googleapis.com", # mailwatch: read-only Gmail via OAuth
     "iam.googleapis.com",
   ])
 }

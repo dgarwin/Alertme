@@ -1,4 +1,4 @@
-LAMBDAS := api pager canary
+LAMBDAS := api pager canary mailwatch
 GOFLAGS := CGO_ENABLED=0 GOOS=linux GOARCH=arm64
 
 .PHONY: build test vet clean $(LAMBDAS)

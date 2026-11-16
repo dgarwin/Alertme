@@ -14,6 +14,13 @@
     "// replicaRegions": "extra regions for the DynamoDB global table, e.g. [\"us-west-2\"]. Empty = single region.",
     "replicaRegions": [],
     "// canaryEnabled": "turn on the 5-minute bot-pages-bot canary once implemented",
+    "// mailWatch": "every-10-min Gmail check that pages recipientUserId for unread mail from senders. Secret value is set by tools/gmail-oauth-setup.py.",
+    "mailWatch": {
+      "enabled": true,
+      "senders": ["roroproductions@yahoo.com", "roystonswing@gmail.com"],
+      "recipientUserId": "41ebf560-f061-7025-db7a-cab8151fc173",
+      "gmailSecretName": "alertme/gmail-oauth"
+    },
     "canaryEnabled": false,
     "// apnsPlatformAppArn": "SNS platform application ARN for APNs (iOS). Created out-of-band; empty = push disabled for iOS.",
     "apnsPlatformAppArn": "",

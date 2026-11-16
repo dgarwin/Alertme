@@ -110,3 +110,31 @@ once bot credentials exist (see `cmd/canary`).
 - [x] Canary (`cmd/canary`) — env-driven, no-ops until bot credentials are
       provisioned
 - [ ] Flutter app
+
+## Mail watch (email → page)
+
+`alertme-mailwatch` runs every 10 minutes (EventBridge), searches Gmail for
+**unread** mail from the senders in `cdk.json` → `mailWatch.senders` (last 2
+days), and pages `mailWatch.recipientUserId` once per message, from an
+"AlertMe Mail" bot that pairs itself with the recipient on first run. The
+Gmail message id is the page's idempotency key, so a message that stays
+unread never pages twice. Access is OAuth **gmail.readonly** — the job can't
+send, delete, or mark mail read. Blocking "AlertMe Mail" in the app stops it.
+
+One-time setup (Google Cloud project `claude-code-484803`; the Gmail API is
+enabled by `infra/gcp`):
+
+1. **Google Auth Platform → Branding/Get started**: app name e.g. "AlertMe
+   Mail Watch", your email as support + contact, Audience **External**.
+2. **Audience → Publish app** ("In production"). In "Testing" mode Google
+   expires refresh tokens after 7 days. As an unverified app you'll see a
+   "Google hasn't verified this app" screen on consent — choose Advanced →
+   continue (it's your own app).
+3. **Clients → Create client → Desktop app**, then download the JSON.
+4. `python3 tools/gmail-oauth-setup.py ~/Downloads/client_secret_*.json`
+   (needs AWS CLI auth). It stores the credential in Secrets Manager
+   `alertme/gmail-oauth`; nothing is printed or kept on disk.
+
+Re-run step 4 to rotate. If the token stops working (revoked, password
+change), the `MailwatchErrors` alarm emails `alertEmail` after two failed
+runs. Until the secret exists, runs are logged no-ops.
