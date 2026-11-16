@@ -254,3 +254,40 @@ func TestHandleDeliveredReceipt_NeverRegressesAcked(t *testing.T) {
 		t.Errorf("delivered receipt regressed page state from acked to %s", got.State)
 	}
 }
+
+// Regression: a brand-new user (no user row yet) creates an invite and
+// another brand-new user accepts it. AcceptInvite needs the creator's user
+// row for the denormalized peer name, so handleCreateInvite must ensure it.
+func TestInviteAccept_FreshUsers(t *testing.T) {
+	st := fake.New()
+	srv := New(st, &fake.Enqueuer{}, nil)
+
+	t.Setenv("DEV_USER_ID", "alice")
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/invites", jsonBody(map[string]string{})))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create invite: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var inv struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &inv); err != nil || inv.Code == "" {
+		t.Fatalf("bad invite body %q: %v", rec.Body.String(), err)
+	}
+
+	t.Setenv("DEV_USER_ID", "bob")
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/invites/"+inv.Code+"/accept", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("accept invite: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Pairing model.Pairing `json:"pairing"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Pairing.UserID != "bob" || resp.Pairing.PeerID != "alice" || resp.Pairing.Status != model.PairingActive {
+		t.Errorf("unexpected pairing: %+v", resp.Pairing)
+	}
+}

@@ -12,3 +12,6 @@ backend/dist/
 *.tfstate
 *.tfstate.*
 *.tfplan
+
+# Local test accounts (never commit)
+.test-users.local

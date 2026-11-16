@@ -154,14 +154,15 @@ export class AlertmeStack extends cdk.Stack {
     );
     // Pager publishes to SNS platform endpoints (created by the api lambda
     // at device-registration time) and prunes ones SNS reports as disabled.
-    // Endpoint ARNs are only known at runtime, so we scope to the SNS
-    // endpoint/ namespace when any platform app is configured, else '*'.
+    // Note: SNS authorizes Publish to a mobile endpoint against the *platform
+    // application* ARN (app/GCM/...), not the endpoint ARN, so the platform
+    // app ARNs must be in the resource list; endpoint/* covers DeleteEndpoint.
     const platformAppArns = [apnsPlatformAppArn, fcmPlatformAppArn].filter(Boolean);
     pagerFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['sns:Publish', 'sns:DeleteEndpoint'],
         resources: platformAppArns.length
-          ? [`arn:aws:sns:${this.region}:${this.account}:endpoint/*`]
+          ? [...platformAppArns, `arn:aws:sns:${this.region}:${this.account}:endpoint/*`]
           : ['*'],
       })
     );

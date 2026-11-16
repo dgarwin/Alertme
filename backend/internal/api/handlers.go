@@ -118,6 +118,13 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The accepter's pairing row denormalizes the creator's display name, so
+	// the creator must have a user row before anyone can accept.
+	if _, err := s.ensureUser(r, id); err != nil {
+		mapStoreErr(w, err)
+		return
+	}
+
 	inv := model.Invite{
 		Code:      randomInviteCode(10),
 		CreatorID: id.UserID,

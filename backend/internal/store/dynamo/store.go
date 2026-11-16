@@ -236,7 +236,9 @@ func (s *Store) AcceptInvite(ctx context.Context, code string, accepter model.Us
 					"PK": &types.AttributeValueMemberS{Value: invitePK(code)},
 					"SK": &types.AttributeValueMemberS{Value: skMeta},
 				},
-				ConditionExpression: aws.String("attribute_exists(PK) AND ttl > :now"),
+				// "ttl" is a DynamoDB reserved word, so it must be aliased.
+				ConditionExpression:      aws.String("attribute_exists(PK) AND #ttl > :now"),
+				ExpressionAttributeNames: map[string]string{"#ttl": "ttl"},
 				ExpressionAttributeValues: map[string]types.AttributeValue{
 					":now": &types.AttributeValueMemberN{Value: strconv.FormatInt(now.Unix(), 10)},
 				},
