@@ -2,3 +2,13 @@ node_modules/
 cdk.out/
 backend/dist/
 *.js.map
+
+# Firebase config (per-developer; see BUILD-SPEC.md)
+**/google-services.json
+**/GoogleService-Info.plist
+
+# Terraform (infra/gcp): local state + provider cache; lock file IS committed
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
